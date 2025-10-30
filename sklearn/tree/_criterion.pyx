@@ -3,7 +3,7 @@
 
 from libc.string cimport memcpy
 from libc.string cimport memset
-from libc.math cimport fabs, INFINITY
+from libc.math cimport fabs, INFINITY, pow
 
 import numpy as np
 cimport numpy as cnp
@@ -289,7 +289,7 @@ cdef class ClassificationCriterion(Criterion):
     """Abstract criterion for classification."""
 
     def __cinit__(self, intp_t n_outputs,
-                  cnp.ndarray[intp_t, ndim=1] n_classes):
+                  cnp.ndarray[intp_t, ndim=1] n_classes, *args, **kwargs):
         """Initialize attributes for this criterion.
 
         Parameters
@@ -672,6 +672,124 @@ cdef class Entropy(ClassificationCriterion):
                 if count_k > 0.0:
                     count_k /= self.weighted_n_right
                     entropy_right -= count_k * log(count_k)
+
+        impurity_left[0] = entropy_left / self.n_outputs
+        impurity_right[0] = entropy_right / self.n_outputs
+
+
+
+cdef class TsallisEntropy(ClassificationCriterion):
+    r"""Tsallis Entropy (q-entropy) impurity criterion.
+
+    This criterion requires a Tsallis parameter 'q'.
+    If q=1, this criterion is equivalent to the standard Shannon entropy.
+
+    Let p_k = count_k / Nm be the proportion of class k observations in
+    node m.
+
+    The Tsallis entropy is then defined as:
+
+        S_q = (1 / (q - 1)) * (1 - \sum_{k=0}^{K-1} p_k^q)
+    """
+
+    # We must add attributes to store the 'q' parameter
+    cdef float64_t q
+    cdef float64_t q_minus_1
+
+    def __cinit__(self, intp_t n_outputs,
+                  cnp.ndarray[intp_t, ndim=1] n_classes,
+                  float64_t q):
+        
+        self.q = q
+        
+        if abs(self.q - 1.0) < 1e-9:
+            self.q_minus_1 = 1.0
+        else:
+            self.q_minus_1 = self.q - 1.0
+
+
+    cdef float64_t node_impurity(self) noexcept nogil:
+        """Calculates the Tsallis entropy for the current node."""
+        cdef float64_t entropy = 0.0
+        cdef float64_t sum_p_q
+        cdef float64_t count_k
+        cdef intp_t k
+        cdef intp_t c
+
+        # Case 1: q is 1 (Shannon Entropy)
+        if abs(self.q - 1.0) < 1e-9:
+            for k in range(self.n_outputs):
+                for c in range(self.n_classes[k]):
+                    count_k = self.sum_total[k, c]
+                    if count_k > 0.0:
+                        count_k /= self.weighted_n_node_samples
+                        entropy -= count_k * log(count_k)
+        
+        # Case 2: q is not 1 (Tsallis Entropy)
+        else:
+            for k in range(self.n_outputs):
+                sum_p_q = 0.0
+                for c in range(self.n_classes[k]):
+                    count_k = self.sum_total[k, c]
+                    if count_k > 0.0:
+                        count_k /= self.weighted_n_node_samples
+                        sum_p_q += pow(count_k, self.q)
+                
+                # Add this output's entropy to the total
+                # S_q = (1 - sum(p_k^q)) / (q - 1)
+                entropy += (1.0 - sum_p_q) / self.q_minus_1
+
+        return entropy / self.n_outputs
+
+    cdef void children_impurity(self, float64_t* impurity_left,
+                                float64_t* impurity_right) noexcept nogil:
+        """Evaluate the Tsallis entropy in children nodes."""
+        cdef float64_t entropy_left = 0.0
+        cdef float64_t entropy_right = 0.0
+        cdef float64_t sum_p_q_left
+        cdef float64_t sum_p_q_right
+        cdef float64_t count_k
+        cdef intp_t k
+        cdef intp_t c
+
+        # Case 1: q is 1 (Shannon Entropy)
+        if abs(self.q - 1.0) < 1e-9:
+            for k in range(self.n_outputs):
+                for c in range(self.n_classes[k]):
+                    # Left child
+                    count_k = self.sum_left[k, c]
+                    if count_k > 0.0:
+                        count_k /= self.weighted_n_left
+                        entropy_left -= count_k * log(count_k)
+
+                    # Right child
+                    count_k = self.sum_right[k, c]
+                    if count_k > 0.0:
+                        count_k /= self.weighted_n_right
+                        entropy_right -= count_k * log(count_k)
+
+        # Case 2: q is not 1 (Tsallis Entropy)
+        else:
+            for k in range(self.n_outputs):
+                sum_p_q_left = 0.0
+                sum_p_q_right = 0.0
+
+                for c in range(self.n_classes[k]):
+                    # Left child
+                    count_k = self.sum_left[k, c]
+                    if count_k > 0.0:
+                        count_k /= self.weighted_n_left
+                        sum_p_q_left += pow(count_k, self.q)
+                    
+                    # Right child
+                    count_k = self.sum_right[k, c]
+                    if count_k > 0.0:
+                        count_k /= self.weighted_n_right
+                        sum_p_q_right += pow(count_k, self.q)
+
+                # Add this output's entropy to the total for each child
+                entropy_left += (1.0 - sum_p_q_left) / self.q_minus_1
+                entropy_right += (1.0 - sum_p_q_right) / self.q_minus_1
 
         impurity_left[0] = entropy_left / self.n_outputs
         impurity_right[0] = entropy_right / self.n_outputs
